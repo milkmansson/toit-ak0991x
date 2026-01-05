@@ -302,7 +302,6 @@ class FusedCompass_:
       --declination-deg/float=0.0
       --logger/log.Logger=log.default:
     logger_ = logger.with-name "fusedcompass"
-    logger_ = logger.with-level log.ERROR-LEVEL
     up-correction-rate_ = up-correction-rate
     accel-min-g_ = accel-min-g
     accel-max-g_ = accel-max-g
