@@ -1,6 +1,7 @@
 # Toit driver for AK0991x (AK09916 and sibling) magnetometer/compass devices.
-A very basis Toit driver for AK09916 (and sibling I2C devices using the same
-register map) from Asahi Kasei.
+A very basic Toit driver for AK09916 (and sibling I2C devices using the same
+register map: AK09912, AK09915, AK09916, and AK09918) from Asahi Kasei
+Microelectronics.
 
 ## Usage
 This driver can be used as with any other I2C device.  To directly access the
@@ -8,7 +9,7 @@ AK09916 built into an ICM20948 device on the I2C bus, the ICM20948 must be first
 be placed into `i2c-bypass` mode.
 
 ### Example
-See examples in the [examples](./examples/) folder
+See examples in the [examples](./examples/) folder.
 ```Toit
 import gpio
 import i2c
@@ -21,7 +22,7 @@ main:
     --frequency=400_000
 
   if not (bus.test ak0991x.Ak0991x.I2C-ADDRESS):
-    print "bus missing the device. stopping..."
+    print "bus missing the I2C address. stopping..."
     return
 
   ak-device := bus.device ak0991x.Ak0991x.I2C-ADDRESS
@@ -29,13 +30,29 @@ main:
 
   print "Bus contains AK09916."
   print "Hardware ID: 0x$(%02x ak-sensor.get-hardware-id)"
+
+  // Start the sensor.  All data returned as zero without this.
   ak-sensor.set-operating-mode ak0991x.Ak0991x.OPMODE-CONT-MODE1-10HZ
+
   sleep --ms=250
   print "Data Ready: $(ak-sensor.is-data-ready)"
   print "Magnetic Field: $ak-sensor.read-magnetic-field"
   print "Bearing (no compensation)  : $(%0.3f ak-sensor.read-bearing)"
 
  ```
+
+### Functions
+Major functions Provided:
+| Function | Explanation |
+| - | - |
+| `read-magnetic-field` | Reads raw magnetometer data, returned in a `Point3f`. |
+| `read-bearing` | Turns a raw magnetometer reading into a degree bearing. No tilt compensation. |
+| `read-bearing-fused` | A basic sensor fusion function, computing a bearing and taking `--accel` and `--gyro` Point3f's as inputs. Implemented using the `FusedCompass_` class.  _Further Testing required - requires a better test setup than is presently available._ |
+| `set-operating-mode` | Sets the operating mode to static, or 10Hz, 20Hz, 50Hz, or 100Hz. |
+
+## To do:
+- Provide a calibration method.
+- Do better documentation (currently the code function names etc are largely self-explanatory).
 
 ## Links
 - [AK09912 Datasheet](https://datasheet.datasheetarchive.com/originals/dk/DKDS-11/203760.pdf)

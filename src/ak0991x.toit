@@ -40,7 +40,6 @@ class Ak0991x:
   static NSF-MED ::= 0b10
   static NSF-HI  ::= 0b11
 
-
   // REG-CONTROL-2_ values:
   static OPMODE-SELF-TEST        ::= 0b00010000 // Self Test Mode.
   static OPMODE-CONT-MODE5-5HZ   ::= 0b00001110 // Continuous Mode 5.
