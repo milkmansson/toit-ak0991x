@@ -1,0 +1,4 @@
+name: ak0991x
+description: Driver for AK09916 and sibling magnetometers (digital compass) as built in to ICM20948 9-axis devices.
+environment:
+  sdk: ^v2.0.0-alpha.189
