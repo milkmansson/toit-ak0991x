@@ -95,12 +95,13 @@ class Ak0991x:
   logger_/log.Logger := ?
   hw-id_/int := 0
   man-id_/int := 0
-  rpe_/Roll-Pitch-Estimator_ := ?
+  declination_/float := 0.0
+  fused-compass_/FusedCompass_ := ?
 
   constructor dev/Device --logger/log.Logger=log.default:
     reg_ = dev.registers
     logger_ = logger.with-name "ak09916"
-    rpe_ = Roll-Pitch-Estimator_
+    fused-compass_ = FusedCompass_ --logger=logger_
 
     hw-id_ = get-hardware-id
     man-id_ = get-manufacturer-id
@@ -142,43 +143,23 @@ class Ak0991x:
 
     return Point3f x y z
 
-  read-bearing -> float
-      field/Point3f=read-magnetic-field
-      --roll/float?=null
-      --pitch/float?=null
-      --declination/float=0.0:
+  read-bearing field/Point3f=read-magnetic-field -> float:
     heading/float := ?
-
-    if (roll != null) and (pitch != null):
-      if not is-finite_ roll or not is-finite_ pitch:
-        logger_.error "roll or pitch are invalid"
-        throw "roll or pitch are invalid"
-
-      // Roll/Pitch (tilt compensation) given.
-      cr := cos roll
-      sr := sin roll
-      cp := cos pitch
-      sp := sin pitch
-      mx2 := field.x * cp + field.z * sp
-      my2 := field.x * sr * sp + field.y * cr - field.z * sr * cp
-      heading = (atan2 (-1 * my2) mx2) * 180.0 / PI
-    else:
-      // Roll/Pitch (tilt compensation) not given.
-      heading = (atan2 field.y field.x) * 180.0 / PI
-
-    heading += declination
+    heading = (atan2 field.y field.x) * 180.0 / PI
+    heading += declination_
     if heading < 0:
       heading += 360.0
     return heading
 
-  read-bearing -> float
-      field/Point3f=read-magnetic-field
+  read-bearing-fused -> float
+      --mag/Point3f=read-magnetic-field
       --accel/Point3f
-      --gyro/Point3f
-      --declination/float=0.0:
+      --gyro/Point3f:
+    return fused-compass_.update --accel=accel --gyro=gyro --mag=mag
 
-    rpe_.update --accel=accel --gyro=gyro
-    return read-bearing field --roll=rpe_.roll --pitch=rpe_.pitch --declination=declination
+  set-declination --degrees/float -> none:
+    declination_ = degrees
+    fused-compass_.set-declination --degrees=degrees
 
   // Temperature Function (Specific devices only)
 
@@ -206,12 +187,6 @@ class Ak0991x:
       logger_.error "device does not have temperature register" --tags={"hw":DEV-IDS_[hw-id_]}
       return false
     return (read-register_ REG-CONTROL-1_ --mask=CONTROL-1-TEMP-EN_) == 1
-
-  is-finite_ x/float? -> bool:
-    if x == null: return false
-    return not (x != x) and
-        x != float.INFINITY and
-        x != -float.INFINITY
 
   /**
   Reads and optionally masks/parses register data. (Little-endian.)
@@ -308,68 +283,173 @@ class Ak0991x:
       return
     throw "write-register_: Unhandled Circumstance."
 
-class Roll-Pitch-Estimator_:
-  alpha_/float := ?
-  last-us := 0
-  roll_/float := 0.0
-  pitch_/float := 0.0
+
+class FusedCompass_:
+  // up_ is a unit vector pointing "up" in sensor coordinates.
+  up_/Point3f := Point3f 0 0 1
+  last-us_ := Time.monotonic-us
+  seeded_ := false
   logger_/log.Logger := ?
 
+  up-correction-rate_/float := 0.02
+  accel-min-g_/float := 0.85
+  accel-max-g_/float := 1.15
+  declination-deg_/float := 0.0
+
   constructor
-      --accel/Point3f?=null
-      --gyro/Point3f?=null
-      --alpha/float=0.98
+      --up-correction-rate/float=0.02
+      --accel-min-g/float=0.85
+      --accel-max-g/float=1.15
+      --declination-deg/float=0.0
       --logger/log.Logger=log.default:
-    logger_ = logger.with-name "rpe"
-    alpha_ = alpha
-    last-us = Time.monotonic-us
+    logger_ = logger.with-name "fusedcompass"
+    logger_ = logger.with-level log.ERROR-LEVEL
+    up-correction-rate_ = up-correction-rate
+    accel-min-g_ = accel-min-g
+    accel-max-g_ = accel-max-g
+    declination-deg_ = declination-deg
+    last-us_ = Time.monotonic-us
 
-    if accel and gyro:
-      update --accel=accel --gyro=gyro
+  // Call once to seed up_ from accel when you're roughly still.
+  seed accel/Point3f -> none:
+    // Up is opposite gravity
+    u := unit3_ (Point3f (-accel.x) (-accel.y) (-accel.z))
+    if u == null:
+      seeded_ = false
+      return
+    up_ = u
+    last-us_ = Time.monotonic-us
+    seeded_ = true
+    logger_.debug "measurement seeded" --tags={"u": u}
 
-  update --accel/Point3f --gyro/Point3f -> none:
-    // Time step
+  is-seeded -> bool:
+    return seeded_
+
+  set-declination --degrees/float=0.0 -> none:
+    assert: 0 <= degrees <= 360.0
+    declination-deg_ = degrees
+    logger_.debug "declination set" --tags={"declination": degrees}
+
+  /**
+  Configures 'up correction rate'.
+
+  How fast accel pulls "up" back (0..1-ish). Smaller = rely more on gyro.
+  */
+  set-up-correction-rate rate/float=0.02 -> none:
+    assert: 0 <= rate <= 1.2
+    up-correction-rate_ = rate
+    logger_.debug "up-correction-rate set" --tags={"rate": rate}
+
+  /**
+  Sets minimum and maximum G - gates accel correction when not near 1g.
+  */
+  set-accel-min-max-g --min/float?=null --max/float?=null -> none:
+    if min != null:
+      accel-min-g_ = min
+      logger_.debug "acceleration min g set" --tags={"min": min}
+
+    if max != null:
+      accel-max-g_ = max
+      logger_.debug "acceleration max g set" --tags={"min": max}
+
+  /**
+  Returns heading in degrees [0..360], or NAN if not computable this cycle.
+  */
+  update --accel/Point3f --gyro/Point3f --mag/Point3f -> float:
+    // In case the documentation wasn't read and the accel is not already seeded.
+    if not is-seeded:
+      seed accel
+
+    logger_.debug "starting gyro" --tags={"gyro":"$gyro"}
+    logger_.debug "starting accel" --tags={"accel":"$accel"}
+    logger_.debug "starting mag" --tags={"mag":"$mag"}
+    logger_.debug "starting up" --tags={"up":"$up_"}
+
     now := Time.monotonic-us
-    dt := (now - last-us) / 1000000.0
-    last-us = Time.monotonic-us
+    dt := (now - last-us_) / 1000000.0
+    last-us_ = now
+    if dt <= 0.0:
+      logger_.error "NAN due to time calculation"
+      return float.NAN
 
-    ax := accel.x
-    ay := accel.y
-    az := accel.z
+    // Gyro is deg/s from your driver; convert to rad/s.
+    wx := gyro.x * PI / 180.0
+    wy := gyro.y * PI / 180.0
+    wz := gyro.z * PI / 180.0
+    logger_.debug "gyro rad/s x=$wx y=$wy z=$wz"
 
-    // Accelerometer tilt (radians)
-    roll-acc  := atan2 ay az
-    pitch-acc := atan2 (-ax) (sqrt (ay * ay + az * az))
+    // 1) Propagate "up" using gyro
+    up1 := rotate-small up_ wx wy wz dt
+    if up1 == null:
+      logger_.error "NAN due to up1 == null"
+      return float.NAN
+    up_ = up1
+    logger_.debug "propagated up" --tags={"up":"$up_"}
 
-    // Gyro integration (deg/s to rad/s)
-    gx := gyro.x * PI / 180.0
-    gy := gyro.y * PI / 180.0
+    // 2) Correct "up" toward accelerometer gravity only when accel magnitude ~ 1g
+    amag := norm3_ accel
+    if amag >= accel-min-g_ and amag <= accel-max-g_:
+      logger_.debug "accel magnitude between max and min" --tags={"amag":"$(%0.3f amag)"}
+      up-acc := unit3_ (Point3f (-accel.x) (-accel.y) (-accel.z))
+      if up-acc != null:
+        blended := unit3_ (lerp3_ up_ up-acc up-correction-rate_)
+        if blended != null:
+          up_ = blended
+          logger_.debug "up_ became blended" --tags={"blended":"$up_"}
 
-    roll-gyro  := roll  + gx * dt
-    pitch-gyro := pitch + gy * dt
 
-    if not is-finite_ roll-acc or not is-finite_ pitch-acc:
-      logger_.error "roll (accel) or pitch (accel) invalid (not updating)"
-      return
+    // 3) Tilt-compensate magnetometer by projecting onto horizontal plane
+    // mh = mag - up*(mag·up)
+    mh := sub3_ mag (mul3_ up_ (dot3_ mag up_))
+    mh-u := unit3_ mh
+    if mh-u == null:
+      logger_.error "NAN due to mh-u == null"
+      return float.NAN
+    logger_.debug "mh changed" --tags={"mh":"$mh", "mh-u":"$mh-u"}
 
-    if not is-finite_ roll-gyro or not is-finite_ pitch-gyro:
-      logger_.error "roll (accel) or pitch (accel) invalid (not updating)"
-      return
+    // Heading from tilt-compensated horizontal mag vector.
+    heading := (atan2 mh_u.y mh_u.x) * 180.0 / PI
+    heading += declination-deg_
 
-    // Complementary filter
-    roll_  = alpha_ * roll-gyro  + (1.0 - alpha_) * roll-acc
-    pitch_ = alpha_ * pitch-gyro + (1.0 - alpha_) * pitch-acc
+    while heading < 0.0: heading += 360.0
+    while heading >= 360.0: heading -= 360.0
+    return heading
 
-  roll -> float: return roll_
+  // Rotate vector v by small-angle gyro vector w (rad/s) over dt seconds.
+  // Using first-order approximation: v' = v + (w × v) * dt
+  // Then renormalize.
+  rotate-small v/Point3f wx/float wy/float wz/float dt/float -> Point3f?:
+    dv := mul3_ (cross3_ (Point3f wx wy wz) v) dt
+    return unit3_ (add3_ v dv)
 
-  pitch -> float: return pitch_
+  norm3_ v/Point3f -> float:
+    return sqrt (v.x*v.x + v.y*v.y + v.z*v.z)
 
-  is-nan_ x/float -> bool:
-    return x != x
+  unit3_ v/Point3f -> Point3f?:
+    n := norm3_ v
+    if n < 1e-6: return null
+    return Point3f (v.x/n) (v.y/n) (v.z/n)
 
-  is-inf_ x/float -> bool:
-    return x == float.INFINITY or x == -float.INFINITY
+  dot3_ a/Point3f b/Point3f -> float:
+    return a.x * b.x + a.y * b.y + a.z * b.z
 
-  is-finite_ x/float -> bool:
-    if x == null: return false
-    return not (is-nan_ x) and not (is-inf_ x)
+  cross3_ a/Point3f b/Point3f -> Point3f:
+    return Point3f
+      (a.y * b.z - a.z * b.y)
+      (a.z * b.x - a.x * b.z)
+      (a.x * b.y - a.y * b.x)
+
+  add3_ a/Point3f b/Point3f -> Point3f:
+    return  Point3f (a.x+b.x) (a.y+b.y) (a.z+b.z)
+
+  sub3_ a/ Point3f b/Point3f -> Point3f:
+    return Point3f (a.x - b.x) (a.y - b.y) (a.z - b.z)
+
+  mul3_ v/Point3f s/float -> Point3f:
+    return Point3f (v.x*s) (v.y*s) (v.z*s)
+
+  lerp3_ a/Point3f b/Point3f t/float -> Point3f:
+    return add3_ (mul3_ a (1.0 - t)) (mul3_ b t)
+
+  is-finite x/float -> bool:
+    return x == x and x != float.INFINITY and x != -float.INFINITY
