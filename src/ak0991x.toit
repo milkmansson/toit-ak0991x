@@ -8,7 +8,7 @@ import serial.registers show Registers
 import math show *
 import log
 
-class Ak09916:
+class Ak0991x:
   static I2C-ADDRESS ::= 0x0C   // Magnetometer I2C address.
 
   // Register Map for AK09916
