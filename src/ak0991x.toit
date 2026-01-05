@@ -119,7 +119,7 @@ class Ak0991x:
     assert: OPMODES_.contains mode
     old-mode := read-register_ REG-CONTROL-2_
     write-register_ REG-CONTROL-2_ mode
-    logger_.debug "mode switched" --tags={"was":OPMODES_[old-mode], "now":OPMODES_[mode]}
+    logger_.info "mode switched" --tags={"was":OPMODES_[old-mode], "now":OPMODES_[mode]}
 
   is-data-ready -> bool:
     return (read-register_ REG-STATUS-1_ --mask=STATUS-1-DRDY_) == 1
