@@ -14,6 +14,8 @@ class Ak0991x:
   // Register Map for AK09916
   static REG-COMPANY-ID_    ::= 0x00  // R 1 Device ID.
   static REG-DEV-ID_    ::= 0x01  // R 1 Device ID.
+  static REG-RSV-1_     ::= 0x02  // R 1 Reserved 1.
+  static REG-RSV-2_     ::= 0x03  // R 1 Reserved 2.
   static REG-STATUS-1_  ::= 0x10  // R 1 Data status.
   static REG-X-AXIS_    ::= 0x11  // R 2 X Axis LSB (MSB 0x12).  Signed int.
   static REG-Y-AXIS_    ::= 0x13  // R 2 Y Axis LSB (MSB 0x14).  Signed int.
@@ -49,8 +51,10 @@ class Ak0991x:
   static OPMODE-CONT-MODE1-10HZ  ::= 0b00000010 // Continuous Mode 1.
   static OPMODE-SINGLE-MODE0     ::= 0b00000001 // Single Measurement Mode.
   static OPMODE-OFF              ::= 0b00000000 // Power down mode.
+  static OPMODE-INVALID          ::= 0b11111111
 
   static OPMODES_ := {
+    OPMODE-INVALID: "UNINITIALISED",
     OPMODE-SELF-TEST: "OPMODE-SELF-TEST",
     OPMODE-CONT-MODE5-5HZ: "OPMODE-CONT-MODE5-5HZ",
     OPMODE-CONT-MODE4-100HZ: "OPMODE-CONT-MODE4-100HZ",
@@ -94,6 +98,7 @@ class Ak0991x:
   logger_/log.Logger := ?
   hw-id_/int := 0
   man-id_/int := 0
+  operating-mode_/int := OPMODE-OFF
   declination_/float := 0.0
   fused-compass_/FusedCompass_ := ?
 
@@ -108,40 +113,67 @@ class Ak0991x:
       logger_.error "device id unrecognised" --tags={"detected": "0x$(%02x hw-id_)"}
       throw "device-id $hw-id_ unrecognised"
 
+    //Synchronise OPMODE
+    set-operating-mode OPMODE-OFF
+
+  /** Gives the manufacturer ID. */
   get-manufacturer-id -> int:
     return read-register_ REG-COMPANY-ID_
 
+  /** Gives the device model ID. */
   get-hardware-id -> int:
     return read-register_ REG-DEV-ID_
 
-  set-operating-mode mode/int -> none:
-    assert: OPMODES_.contains mode
-    old-mode := read-register_ REG-CONTROL-2_
-    write-register_ REG-CONTROL-2_ mode
-    logger_.info "mode switched" --tags={"was":OPMODES_[old-mode], "now":OPMODES_[mode]}
+  /**
+  Sets operating (measuring) mode.
 
+  One of $OPMODE-SELF-TEST, $OPMODE-CONT-MODE4-100HZ, $OPMODE-CONT-MODE3-50HZ,
+    $OPMODE-CONT-MODE2-20HZ, $OPMODE-CONT-MODE1-10HZ, $OPMODE-SINGLE-MODE0,
+    $OPMODE-OFF, or $OPMODE-CONT-MODE5-5HZ (specific models only).
+  */
+  set-operating-mode mode/int -> none:
+    assert: (OPMODES_.contains mode) and (mode != OPMODE-INVALID)
+    if operating-mode_ == mode:
+      // mode change unnecessary.
+      return
+    write-register_ REG-CONTROL-2_ mode
+    if operating-mode_ != mode: operating-mode_ = mode
+    logger_.info "mode switched" --tags={"was":OPMODES_[operating-mode_], "now":OPMODES_[mode]}
+
+  /** Whether data is ready. */
   is-data-ready -> bool:
     return (read-register_ REG-STATUS-1_ --mask=STATUS-1-DRDY_) == 1
 
+  /** Whether data overrun has been triggered. */
   is-data-overrun -> bool:
     return (read-register_ REG-STATUS-1_ --mask=STATUS-1-DOR_) == 1
 
+  /** Whether hardware overflow has been triggered. */
   is-hardware-overflow -> bool:
     return (read-register_ REG-STATUS-2_ --mask=STATUS-2-HOFL_) == 1
 
-  read-magnetic-field -> Point3f:
-    bytes := reg_.read-bytes REG-X-AXIS_ 6
-    x := (io.LITTLE-ENDIAN.int16 bytes 0).to-float * UT-PER-LSBS_[hw-id_]
-    y := (io.LITTLE-ENDIAN.int16 bytes 2).to-float * UT-PER-LSBS_[hw-id_]
-    z := (io.LITTLE-ENDIAN.int16 bytes 4).to-float * UT-PER-LSBS_[hw-id_]
 
-    // Read $REG-STATUS-2_ to complete the measurement cycle / clear status.
-    status-2 := read-register_ REG-STATUS-2_
-    if (status-2 & STATUS-2-HOFL_) != 0:
-      logger_.warn "mag overflow" --tags={"status-2":"0x$(%02x status-2)"}
+  // Reads this way to match DMP method for ICM20948.  It reads all the values
+  // for a single measurement at once, including REG-STATUS-2_, which clears
+  // the $STATUS-1-DRDY_ bit.
+  read-magnetic-field -> Point3f:
+    if operating-mode_ == OPMODE-OFF:
+      // Cope with one shot mode.  Set to single shot, then do measurement.
+      // Single shot returns mode to $OPMODE-OFF afterwards.
+      set-operating-mode OPMODE-SINGLE-MODE0
+    bytes := reg_.read-bytes REG-RSV-2_ 10
+    x := (io.LITTLE-ENDIAN.int16 bytes 2).to-float * UT-PER-LSBS_[hw-id_]
+    y := (io.LITTLE-ENDIAN.int16 bytes 4).to-float * UT-PER-LSBS_[hw-id_]
+    z := (io.LITTLE-ENDIAN.int16 bytes 6).to-float * UT-PER-LSBS_[hw-id_]
+
+    // Reading $REG-STATUS-2_ (in bytes[9]) resets $STATUS-1-DRDY_.
+    // Checking $REG-STATUS-2_ for Hardware Overflow ($STATUS-2-HOFL_).
+    if (bytes[9] & STATUS-2-HOFL_) != 0:
+      logger_.warn "mag overflow" --tags={"status-2":"0x$(%02x bytes[9])"}
 
     return Point3f x y z
 
+  /** Converts a read-magnetic-field point3f into a bearing. */
   read-bearing field/Point3f=read-magnetic-field -> float:
     heading/float := ?
     heading = (atan2 field.y field.x) * 180.0 / PI
@@ -150,18 +182,36 @@ class Ak0991x:
       heading += 360.0
     return heading
 
+  /**
+  Converts a read-magnetic-field point3f into a tilt corrected bearing.
+
+  Requires Gyro/Accelerometer data in Point3f's in $accel and $gyro.
+  */
   read-bearing-fused -> float
       --mag/Point3f=read-magnetic-field
       --accel/Point3f
       --gyro/Point3f:
     return fused-compass_.update --accel=accel --gyro=gyro --mag=mag
 
+  /**
+  Set the declination of the current location.
+
+  Compass declination (also called magnetic declination) is the angle between
+    true north (the direction toward Earth's geographic North Pole) and magnetic
+    north (the direction a compass needle points).  Because Earth's magnetic
+    field shifts over time and varies by location, this angle differs depending
+    on where you are and must be accounted for when navigating with a map and
+    compass.
+
+  This is set once on the class, and will only affect subsequent bearing reads.
+  */
   set-declination --degrees/float -> none:
     declination_ = degrees
     fused-compass_.set-declination --degrees=degrees
 
   // Temperature Function (Specific devices only)
 
+  /** Reads current die temperature (if available). */
   read-temperature -> float:
     if not HAS-TEMPS_.contains hw-id_:
       logger_.error "device does not have temperature register" --tags={"hw":DEV-IDS_[hw-id_]}
@@ -169,18 +219,21 @@ class Ak0991x:
     raw := read-register_ REG-STATUS-1_
     return 35.0 + ((120.0 - raw.to-float) / 1.6)
 
+  /** Enables temperature reading (if available). */
   enable-temperature -> none:
     if not HAS-TEMPS_.contains hw-id_:
       logger_.error "device does not have temperature register" --tags={"hw":DEV-IDS_[hw-id_]}
       return
     write-register_ REG-CONTROL-1_ 1 --mask=CONTROL-1-TEMP-EN_
 
+  /** Disables temperature reading (if available). */
   disable-temperature -> none:
     if not HAS-TEMPS_.contains hw-id_:
       logger_.error "device does not have temperature register" --tags={"hw":DEV-IDS_[hw-id_]}
       return
     write-register_ REG-CONTROL-1_ 0 --mask=CONTROL-1-TEMP-EN_
 
+  /** Whether temperature reading is enabled (if available). */
   is-temperature-enabled -> bool:
     if not HAS-TEMPS_.contains hw-id_:
       logger_.error "device does not have temperature register" --tags={"hw":DEV-IDS_[hw-id_]}
