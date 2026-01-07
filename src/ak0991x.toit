@@ -116,12 +116,21 @@ class Ak0991x:
     //Synchronise OPMODE
     set-operating-mode OPMODE-OFF
 
+  /** Gives the manufacturer ID. */
   get-manufacturer-id -> int:
     return read-register_ REG-COMPANY-ID_
 
+  /** Gives the device model ID. */
   get-hardware-id -> int:
     return read-register_ REG-DEV-ID_
 
+  /**
+  Sets operating (measuring) mode.
+
+  One of $OPMODE-SELF-TEST, $OPMODE-CONT-MODE4-100HZ, $OPMODE-CONT-MODE3-50HZ,
+    $OPMODE-CONT-MODE2-20HZ, $OPMODE-CONT-MODE1-10HZ, $OPMODE-SINGLE-MODE0,
+    $OPMODE-OFF, or $OPMODE-CONT-MODE5-5HZ (specific models only).
+  */
   set-operating-mode mode/int -> none:
     assert: (OPMODES_.contains mode) and (mode != OPMODE-INVALID)
     if operating-mode_ == mode:
@@ -131,12 +140,15 @@ class Ak0991x:
     if operating-mode_ != mode: operating-mode_ = mode
     logger_.info "mode switched" --tags={"was":OPMODES_[operating-mode_], "now":OPMODES_[mode]}
 
+  /** Whether data is ready. */
   is-data-ready -> bool:
     return (read-register_ REG-STATUS-1_ --mask=STATUS-1-DRDY_) == 1
 
+  /** Whether data overrun has been triggered. */
   is-data-overrun -> bool:
     return (read-register_ REG-STATUS-1_ --mask=STATUS-1-DOR_) == 1
 
+  /** Whether hardware overflow has been triggered. */
   is-hardware-overflow -> bool:
     return (read-register_ REG-STATUS-2_ --mask=STATUS-2-HOFL_) == 1
 
@@ -154,13 +166,14 @@ class Ak0991x:
     y := (io.LITTLE-ENDIAN.int16 bytes 4).to-float * UT-PER-LSBS_[hw-id_]
     z := (io.LITTLE-ENDIAN.int16 bytes 6).to-float * UT-PER-LSBS_[hw-id_]
 
-    // Read $REG-STATUS-2_ to complete the measurement cycle / clear status.
-    //status-2 := read-register_ REG-STATUS-2_
+    // Reading $REG-STATUS-2_ (in bytes[9]) resets $STATUS-1-DRDY_.
+    // Checking $REG-STATUS-2_ for Hardware Overflow ($STATUS-2-HOFL_).
     if (bytes[9] & STATUS-2-HOFL_) != 0:
       logger_.warn "mag overflow" --tags={"status-2":"0x$(%02x bytes[9])"}
 
     return Point3f x y z
 
+  /** Converts a read-magnetic-field point3f into a bearing. */
   read-bearing field/Point3f=read-magnetic-field -> float:
     heading/float := ?
     heading = (atan2 field.y field.x) * 180.0 / PI
@@ -169,18 +182,36 @@ class Ak0991x:
       heading += 360.0
     return heading
 
+  /**
+  Converts a read-magnetic-field point3f into a tilt corrected bearing.
+
+  Requires Gyro/Accelerometer data in Point3f's in $accel and $gyro.
+  */
   read-bearing-fused -> float
       --mag/Point3f=read-magnetic-field
       --accel/Point3f
       --gyro/Point3f:
     return fused-compass_.update --accel=accel --gyro=gyro --mag=mag
 
+  /**
+  Set the declination of the current location.
+
+  Compass declination (also called magnetic declination) is the angle between
+    true north (the direction toward Earth's geographic North Pole) and magnetic
+    north (the direction a compass needle points).  Because Earth's magnetic
+    field shifts over time and varies by location, this angle differs depending
+    on where you are and must be accounted for when navigating with a map and
+    compass.
+
+  This is set once on the class, and will only affect subsequent bearing reads.
+  */
   set-declination --degrees/float -> none:
     declination_ = degrees
     fused-compass_.set-declination --degrees=degrees
 
   // Temperature Function (Specific devices only)
 
+  /** Reads current die temperature (if available). */
   read-temperature -> float:
     if not HAS-TEMPS_.contains hw-id_:
       logger_.error "device does not have temperature register" --tags={"hw":DEV-IDS_[hw-id_]}
@@ -188,18 +219,21 @@ class Ak0991x:
     raw := read-register_ REG-STATUS-1_
     return 35.0 + ((120.0 - raw.to-float) / 1.6)
 
+  /** Enables temperature reading (if available). */
   enable-temperature -> none:
     if not HAS-TEMPS_.contains hw-id_:
       logger_.error "device does not have temperature register" --tags={"hw":DEV-IDS_[hw-id_]}
       return
     write-register_ REG-CONTROL-1_ 1 --mask=CONTROL-1-TEMP-EN_
 
+  /** Disables temperature reading (if available). */
   disable-temperature -> none:
     if not HAS-TEMPS_.contains hw-id_:
       logger_.error "device does not have temperature register" --tags={"hw":DEV-IDS_[hw-id_]}
       return
     write-register_ REG-CONTROL-1_ 0 --mask=CONTROL-1-TEMP-EN_
 
+  /** Whether temperature reading is enabled (if available). */
   is-temperature-enabled -> bool:
     if not HAS-TEMPS_.contains hw-id_:
       logger_.error "device does not have temperature register" --tags={"hw":DEV-IDS_[hw-id_]}
