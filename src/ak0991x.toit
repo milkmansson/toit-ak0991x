@@ -14,6 +14,8 @@ class Ak0991x:
   // Register Map for AK09916
   static REG-COMPANY-ID_    ::= 0x00  // R 1 Device ID.
   static REG-DEV-ID_    ::= 0x01  // R 1 Device ID.
+  static REG-RSV-1_     ::= 0x02  // R 1 Reserved 1.
+  static REG-RSV-2_     ::= 0x03  // R 1 Reserved 2.
   static REG-STATUS-1_  ::= 0x10  // R 1 Data status.
   static REG-X-AXIS_    ::= 0x11  // R 2 X Axis LSB (MSB 0x12).  Signed int.
   static REG-Y-AXIS_    ::= 0x13  // R 2 Y Axis LSB (MSB 0x14).  Signed int.
@@ -49,8 +51,10 @@ class Ak0991x:
   static OPMODE-CONT-MODE1-10HZ  ::= 0b00000010 // Continuous Mode 1.
   static OPMODE-SINGLE-MODE0     ::= 0b00000001 // Single Measurement Mode.
   static OPMODE-OFF              ::= 0b00000000 // Power down mode.
+  static OPMODE-INVALID          ::= 0b11111111
 
   static OPMODES_ := {
+    OPMODE-INVALID: "UNINITIALISED",
     OPMODE-SELF-TEST: "OPMODE-SELF-TEST",
     OPMODE-CONT-MODE5-5HZ: "OPMODE-CONT-MODE5-5HZ",
     OPMODE-CONT-MODE4-100HZ: "OPMODE-CONT-MODE4-100HZ",
@@ -94,6 +98,7 @@ class Ak0991x:
   logger_/log.Logger := ?
   hw-id_/int := 0
   man-id_/int := 0
+  operating-mode_/int := OPMODE-OFF
   declination_/float := 0.0
   fused-compass_/FusedCompass_ := ?
 
@@ -108,6 +113,9 @@ class Ak0991x:
       logger_.error "device id unrecognised" --tags={"detected": "0x$(%02x hw-id_)"}
       throw "device-id $hw-id_ unrecognised"
 
+    //Synchronise OPMODE
+    set-operating-mode OPMODE-OFF
+
   get-manufacturer-id -> int:
     return read-register_ REG-COMPANY-ID_
 
@@ -115,10 +123,13 @@ class Ak0991x:
     return read-register_ REG-DEV-ID_
 
   set-operating-mode mode/int -> none:
-    assert: OPMODES_.contains mode
-    old-mode := read-register_ REG-CONTROL-2_
+    assert: (OPMODES_.contains mode) and (mode != OPMODE-INVALID)
+    if operating-mode_ == mode:
+      // mode change unnecessary.
+      return
     write-register_ REG-CONTROL-2_ mode
-    logger_.info "mode switched" --tags={"was":OPMODES_[old-mode], "now":OPMODES_[mode]}
+    if operating-mode_ != mode: operating-mode_ = mode
+    logger_.info "mode switched" --tags={"was":OPMODES_[operating-mode_], "now":OPMODES_[mode]}
 
   is-data-ready -> bool:
     return (read-register_ REG-STATUS-1_ --mask=STATUS-1-DRDY_) == 1
@@ -129,16 +140,24 @@ class Ak0991x:
   is-hardware-overflow -> bool:
     return (read-register_ REG-STATUS-2_ --mask=STATUS-2-HOFL_) == 1
 
+
+  // Reads this way to match DMP method for ICM20948.  It reads all the values
+  // for a single measurement at once, including REG-STATUS-2_, which clears
+  // the $STATUS-1-DRDY_ bit.
   read-magnetic-field -> Point3f:
-    bytes := reg_.read-bytes REG-X-AXIS_ 6
-    x := (io.LITTLE-ENDIAN.int16 bytes 0).to-float * UT-PER-LSBS_[hw-id_]
-    y := (io.LITTLE-ENDIAN.int16 bytes 2).to-float * UT-PER-LSBS_[hw-id_]
-    z := (io.LITTLE-ENDIAN.int16 bytes 4).to-float * UT-PER-LSBS_[hw-id_]
+    if operating-mode_ == OPMODE-OFF:
+      // Cope with one shot mode.  Set to single shot, then do measurement.
+      // Single shot returns mode to $OPMODE-OFF afterwards.
+      set-operating-mode OPMODE-SINGLE-MODE0
+    bytes := reg_.read-bytes REG-RSV-2_ 10
+    x := (io.LITTLE-ENDIAN.int16 bytes 2).to-float * UT-PER-LSBS_[hw-id_]
+    y := (io.LITTLE-ENDIAN.int16 bytes 4).to-float * UT-PER-LSBS_[hw-id_]
+    z := (io.LITTLE-ENDIAN.int16 bytes 6).to-float * UT-PER-LSBS_[hw-id_]
 
     // Read $REG-STATUS-2_ to complete the measurement cycle / clear status.
-    status-2 := read-register_ REG-STATUS-2_
-    if (status-2 & STATUS-2-HOFL_) != 0:
-      logger_.warn "mag overflow" --tags={"status-2":"0x$(%02x status-2)"}
+    //status-2 := read-register_ REG-STATUS-2_
+    if (bytes[9] & STATUS-2-HOFL_) != 0:
+      logger_.warn "mag overflow" --tags={"status-2":"0x$(%02x bytes[9])"}
 
     return Point3f x y z
 
