@@ -8,8 +8,8 @@ import ak0991x
 
 main:
   bus := i2c.Bus
-    --sda=gpio.Pin 8
-    --scl=gpio.Pin 9
+    --sda=gpio.Pin 19
+    --scl=gpio.Pin 20
     --frequency=400_000
 
   if not (bus.test ak0991x.Ak0991x.I2C-ADDRESS):
